@@ -1,11 +1,12 @@
 import numpy as np
 from scipy.interpolate import interp1d, interpn
+import time
 
 _M = np.array([0.2, 0.4, 0.5, 0.6, 0.8, 1.0, 1.5, 2, 4, 10])
 _N = np.array([0.003, 0.006, 0.024])
 _Gc = np.array([0.0556, 0.111, 0.222, 0.556, 1.11, 2.78])
 
-L10a = np.array([
+L10 = np.array([
                 # C1
                 [# M = 0.2
                  [# N = 0.003
@@ -330,18 +331,28 @@ L10a = np.array([
                   # N = 0.024
                   [15.0, 10.0, 5.0, 10.0, 15.0, 15.0]]]])
 
-def get_L10_params(Gc, N, M):
-    return tuple(interp1d(_M, interp1d(_N, interp1d(_Gc, L10a)(Gc))(N))(M))
+L10a = np.swapaxes(np.swapaxes(L10, 0, 3), 1, 2)
+
+def get_L10_interp1d(Gc, N, M):
+    return tuple(interp1d(_M, interp1d(_N, interp1d(_Gc, L10)(Gc))(N))(M))
+
+def get_L10_interpn(Gc, N, M):
+    return interpn((_Gc, _N, _M), L10a, (Gc, N, M))
 
 
-def n_dim_interp(Gc, N, M):
-    return tuple(interpn((np.array([0,1,2,3]), _M, _N, _Gc), L10a, (i, M, N, Gc))[0] for i in range(4))
+v_get_L10_interp1d = np.vectorize(get_L10_interp1d)
+pts = [10, 100, 1000, 10000]
+funcs = {'interp1d': v_get_L10_interp1d,
+         'interpn': get_L10_interpn}
 
+for p in pts:
 
+    Gcs = np.random.uniform(0.0556, 2.78, p)
+    Ns = np.random.uniform(0.003, 0.024, p)
+    Ms = np.random.uniform(0.2, 10, p)
 
-pts = 10
-Gcs = np.random.uniform(0.0556, 2.78, pts)
-Ns = np.random.uniform(0.003, 0.024, pts)
-Ms = np.random.uniform(0.2, 10, pts)
-print(np.vectorize(get_L10_params)(Gcs, Ns, Ms))
-print(n_dim_interp(Gcs[0], Ns[0], Ms[0]))
+    for f in funcs.keys():
+        s = time.time()
+        funcs[f](Gcs, Ns, Ms)
+        e = time.time()
+        print(f"{f} for {p} pts: {e-s:.5f}s")
