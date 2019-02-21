@@ -5,66 +5,60 @@ sys.path.insert(0, os.getcwd())
 import src.soil.dnv_soil as dnv
 import src.hydrodynamics.waves as w
 import src.hydrodynamics.current as c
-import src.route_selection.lcp_lib as lcp
-import src.bottom_roughness.bottom_roughness as br
 import numpy as np
 from math import sqrt
 from scipy.constants import g
-from scipy.interpolate import interp2d
-from scipy.optimize import newton
+from scipy.interpolate import interp1d
+from scipy.optimize import minimize
 
-def overall_stability(Hs, Tp, d, spectrum, theta_w, s, OD, Vc, z0,     
-                      zr, theta_c, soil_type, rho_w, su, gamma, d50,
-                      rho_p, Fc, wt, location, z_t, theta_t, mu, grade,
-                      T_ss, kv, Fz):
+def get_wall_thick(Hs, Tp, d, theta_w, mu, s, Vc, rho_s, rho_cont, rho_conc, 
+                    z0, zr, theta_c, su, gammas, OD, rho_m, rho_coat, t_corr,
+                    t_conc, t_m, t_coat, soil_type, rho_sw, Fc, wt, location, 
+                    grade, T_ss, kv, theta_t, z_t, Fz, spectrum):
 
-    w_t = wt
+    w_virt = virtual_stability(Hs, Tp, d, theta_w, s, Vc, rho_s, rho_cont, rho_conc, 
+                      z0, zr, theta_c, su, gammas, OD, rho_m, rho_coat, t_corr,
+                      t_conc, t_m, soil_type, rho_sw, Fc, wt, spectrum)
 
-    w10D = general_stability_10D(Hs, Tp, d, spectrum, theta_w, s, OD, Vc,
-                                 z0, zr, theta_c, soil_type, rho_w, su,
-                                 gamma, d50)
+    w_abs = absolute_stability(rho_sw, rho_s, rho_cont, OD, mu, gammas, su, soil_type, location, 
+                        grade, wt, Hs, Tp, d, s, T_ss, kv, Fc, theta_t, 
+                        z_t, Vc, z0, zr, theta_c, theta_w, Fz, rho_conc, rho_m,
+                        rho_coat, t_corr, t_conc, t_m, t_coat, spectrum)
 
-    w05D = general_stability_05D(Hs, Tp, d, theta_w, s, Vc, z0, zr, 
-                                  theta_c, su, gamma, OD, soil_type, rho_w,
-                                  Fc, wt, rho_p, spectrum)
+    w_sub =  get_wsub(OD, wt, t_corr, t_conc, t_m, t_coat, rho_s, rho_cont,
+             rho_conc, rho_m, rho_coat, rho_sw)
+
+    x_0 = OD / 20
+
+    def f_virt(wt):
+
+        return (w_virt / w_sub) - 0.99
+
+    w_virt = minimize(f_virt, x_0)
+
+    def f_abs_1(wt):
+
+        return (w_abs[0] / w_sub) - 0.99
     
-    SFs_abs = absolute_stability(rho_w, rho_p, OD, mu, gamma, su, soil_type,
-                                location, grade, w_t, Hs, Tp, d, s, T_ss,
-                                kv, Fc, theta_t, z_t, Vc,z0, zr, theta_c, 
-                                theta_w, Fz, spectrum)
+    w_abs_1 = minimize(f_abs_1, x_0)
 
-    w_s = br._get_submerged_weight(OD, w_t, rho_p, rho_w)
+    def f_abs_2(wt):
 
-    SF_w10D = w10D / w_s
-    SF_w05D = w05D / w_s
-    SF_1ABS = SFs_abs[0]
-    SF_2ABS = SFs_abs[1]
+        return (w_abs[1] / w_sub) - 0.99
 
-    return (SF_w10D, SF_w05D, SF_1ABS, SF_2ABS)
+    w_abs_2 = minimize(f_abs_2, x_0)
+
+    wt_stab = np.max(w_virt, w_abs_1, w_abs_2)
+
+    return wt_stab
 
 
-def w_t_10D(Hs, Tp, d, spectrum, theta_w, s, OD, Vc, z0, zr,
-            theta_c, soil_type, rho_w, su, gamma, d50, rho_p,):
-    
-
-    def SF(w_t):
-        w10D = general_stability_10D(Hs, Tp, d, spectrum, theta_w, s, OD, Vc,
-                                 z0, zr, theta_c, soil_type, rho_w, su,
-                                 gamma, d50)
-
-        w_s = br._get_submerged_weight(OD, w_t, rho_p, rho_w)
-        return (w10D / w_s) - 1
-
-    w_t_10D = newton(SF, 10)
-
-    return w_t_10D
-
-def general_stability_10D(Hs, Tp, d, spectrum, theta_w, s, OD, Vc,
+def general_stability(Hs, Tp, d, theta_w, s, OD, Vc,
                           z0, zr, theta_c, soil_type, rho_w, su,
-                          gamma, d50):
+                          gamma, t_corr, t_conc, t_m, spectrum):
     """
         General stability is determined by calculating the minimum
-        pipe weight that is required to keep the pipe stable whilst on
+        pipe weight that is required to minimise movement whilst on
         the seabed. This is then compared to the known weight of the pipe
         and a stability assessment made. 
         
@@ -72,23 +66,29 @@ def general_stability_10D(Hs, Tp, d, spectrum, theta_w, s, OD, Vc,
         keep the pipe stable to a lateral displacement of 10 x the diameter
         of the pipe. 
     """
+    U_s = get_U_s(Hs, Tp, d, spectrum)
+    T_u = get_T_u(Hs, Tp, d, spectrum, theta_w, s)
+    Gc = dnv.get_Gc(su, OD, gamma)
+    N = get_N(U_s, T_u)
+    K = get_K(U_s, T_u, OD)
+    M = get_M(Vc, z0, zr, OD, theta_c, U_s)
+    D_o = get_D_o(OD, t_corr, t_conc, t_m)
 
     if soil_type == 'Sand':
-        stab_L = get_L10_sand(Hs, Tp, d, spectrum, theta_w, s, OD, Vc, z0, zr, theta_c)
+        stab_L = get_L10_sand(K, M)
     elif soil_type == 'Clay':
-        stab_L = get_L_10_clay(su, OD, gamma, Hs, Tp, d, spectrum, theta_w, s, Vc, z0, zr,
-                               theta_c, d50)
+        stab_L = get_L_10_clay(Gc, N, K, M)
     else:
         raise TypeError("Wrong soil type entered")
 
-    return stab_L * 0.5 * rho_w * OD * (2 * sqrt(w.get_M(0, Hs, Tp, d, spectrum)))**2
+    return stab_L * 0.5 * rho_w * D_o * U_s**2
 
 
-def general_stability_05D(Hs, Tp, d, theta_w, s, Vc,
-                      z0, zr, theta_c, su, gammas, OD,
-                      soil_type, rho_w, Fc, wt, rho_p, spectrum):
+def virtual_stability(Hs, Tp, d, theta_w, s, Vc, rho_s, rho_cont, rho_conc, 
+                      z0, zr, theta_c, su, gamma, OD, rho_m, rho_coat, t_corr,
+                      t_conc, t_m, soil_type, rho_sw, Fc, wt, spectrum):
     """
-        General stability is determined by calculating the minimum
+        Virtual stability is determined by calculating the minimum
         pipe weight that is required to keep the pipe stable whilst on
         the seabed. This is then compared to the known weight of the pipe
         and a stability assessment made. 
@@ -98,31 +98,33 @@ def general_stability_05D(Hs, Tp, d, theta_w, s, Vc,
         of the pipe. 
  
     """
+    U_s = get_U_s(Hs, Tp, d, spectrum)
+    T_u = get_T_u(Hs, Tp, d, spectrum, theta_w, s)
+    Gc = dnv.get_Gc(su, OD, gamma)
+    N = get_N(U_s, T_u)
+    K = get_K(U_s, T_u, OD)
+    M = get_M(Vc, z0, zr, OD, theta_c, U_s)
+    f_M = get_f_M(M)
+
     # Use previous calculations to get the factor used to calculate the
     # minimum pipe weight required for stability. 
-    min_L_clay = get_L_stable_clay(Hs, Tp, d, theta_w, s,
-                                   Vc, z0, zr, theta_c, su, gammas,
-                                   OD, Fc, spectrum)
+    min_L_clay = get_L_stable_clay(Gc, N, K, f_M)
+    min_L_sand = get_L_stable_sand(N, K, M)
+    D_o = get_D_o(OD, t_corr, t_conc, t_m)
     
-    min_L_sand = get_L_stable_sand(Hs, Tp, d, theta_w, s,
-                                   Vc, z0, zr, OD, theta_c, spectrum)
-
-    M = get_M(Vc, z0, zr, OD, theta_c, Hs, Tp, d, spectrum)
 
     if soil_type == 'Sand':
-        gen_stab_w = min_L_clay
+        virt_stab = min_L_clay
     elif soil_type == 'Clay':
-        gen_stab_w = min_L_sand
+        virt_stab = min_L_sand
     else:
         raise TypeError("Incorrect soil type")
-    
-    # To ensure the calculation is within the right bounds, use the sg
-    # value calculated and the limits given in Section 3.5.2.
-    sg = get_sg(Hs, Tp, d, theta_w, s, OD, wt, rho_p, rho_w, spectrum)
 
-    return sg * 0.5 * OD * gen_stab_w * rho_w * M**2
+    return 0.5 * virt_stab * rho_sw * D_o * U_s**2
 
-def get_sg(Hs, Tp, d, theta_w, s, OD, wt, rho_p, rho_w, spectrum):
+def get_sg(Hs, Tp, d, theta_w, s, OD, wt, rho_s, rho_sw, 
+           rho_cont, rho_conc, rho_m, rho_coat, t_corr, 
+           t_conc, t_m, t_coat, spectrum):
     """
         Calculate the specific weight of a pipe as per
         Equation 3.33 DNVGL-RP-F109. Only valid if the value
@@ -140,11 +142,15 @@ def get_sg(Hs, Tp, d, theta_w, s, OD, wt, rho_p, rho_w, spectrum):
     """
 
     # These factors come from Section 1 of DNVGL-RP-F109
-    N = get_N(Hs, Tp, d, spectrum, theta_w, s)
-    K = get_K(Hs, Tp, d, spectrum, theta_w, s, OD)
-    L = get_L(OD, wt, rho_p, rho_w, Hs, Tp, d, spectrum)
+    U_s = get_U_s(Hs, Tp, d, spectrum)
+    T_u = get_T_u(Hs, Tp, d, spectrum, theta_w, s)
+    w_s = get_wsub(OD, wt, t_corr, t_conc, t_m, t_coat, rho_s, rho_cont,
+             rho_conc, rho_m, rho_coat, rho_sw)
+    N = get_N(U_s, T_u)
+    K = get_K(U_s, T_u, OD)
+    L = get_L(U_s, w_s, OD, rho_sw)
 
-    sg = 1 + 2 / np.pi * N * K * L
+    sg = 1 + (2 / np.pi) * N * K * L
 
     if sg <=1.05:
         print("Sg too low")
@@ -154,13 +160,11 @@ def get_sg(Hs, Tp, d, theta_w, s, OD, wt, rho_p, rho_w, spectrum):
         fact = 0
     else:
         fact = 1
-    # Equation 3.33
 
     return fact * sg
 
 
-def get_L_10_clay(su, OD, gamma, Hs, Tp, d, spectrum,
-                  theta_w, s, Vc, z0, zr, theta_c, d50):
+def get_L_10_clay(Gc, N, K, M):
 
     """
         To get the parameter required to calculate the required weight
@@ -169,61 +173,25 @@ def get_L_10_clay(su, OD, gamma, Hs, Tp, d, spectrum,
         upon Gc, N and M. 
     """
 
-    Gc = dnv.get_Gc(su, OD, gamma)
-    N = get_N(Hs, Tp, d, spectrum, theta_w, s)
-    K = get_K(Hs, Tp, d, spectrum, theta_w, s, OD)
-    M = get_M(Vc, z0, zr, OD, theta_c, Hs, Tp, d, spectrum)
-    K_b = 2.5 * d50
-    Gc_val = min(Gc_values, key=lambda x:abs(x-Gc))
-    x = Gc_values.index(Gc_val)
+    C1, C2, C3, Kb = get_L10_params(Gc, N, M)
 
-    if N <= 0.003:
-        y = 1
-    elif 0.003 < N <= 0.006:
-        y = 3
-    else:
-        y = 2
-
-    d = (str(x) + str(y))
-
-    if y == 1 or y == 2:
-        array_set = values[d]
-        m_value = array_set[:, 0]
-        y_value = lcp._get_closest(m_value, M)
-        C1 = array_set[y_value, 1]
-        C2 = array_set[y_value, 2]
-        C3 = array_set[y_value, 3]
-        K_b = array_set[y_value, 4]
-    elif y == 3:
-        d1 = (str(x) + str(1))
-        d2 = (str(x) + str(2))
-        array_1 = values[d1]
-        array_2 = values[d2]
-        m_value_1 = array_1[:, 0]
-        m_value_2 = array_2[:, 0]
-        y_val_1 = lcp._get_closest(m_value_1, M)
-        y_val_2 = lcp._get_closest(m_value_2, M)
-        C1_1 = np.array([array_1[y_val_1, 1], array_2[y_val_2, 1]])
-        C2_1 = np.array([array_1[y_val_1, 2], array_2[y_val_2, 2]])
-        C3_1 = np.array([array_1[y_val_1, 3], array_2[y_val_2, 3]])
-        K_b1 = np.array([array_1[y_val_1, 4], array_2[y_val_2, 4]])
-        N_val = np.array([0.003, 0.006])
-        Z = np.array([0,1])
-        C1 = interp2d(C1_1, N_val, Z, kind='linear')
-        C2 = interp2d(C2_1, N_val, Z, kind='linear')
-        C3 = interp2d(C3_1, N_val, Z, kind='linear')
-        K_b = interp2d(K_b1, N_val, Z, kind='linear')
-
-    if K >= K_b:
+    if K >= Kb:
         L_10_clay = (C1 + C2 / K**C3) * (2 + M)**2
     else:
-        L_10_clay = (C1 + C2 / K_b**C3) * (2 + M)**2
+        L_10_clay = (C1 + C2 / Kb**C3) * (2 + M)**2
 
     return L_10_clay
 
+def get_L10_params(Gc, N, M):
 
-def get_L10_sand(Hs, Tp, d, spectrum, theta_w, s, OD, 
-                 Vc, z0, zr, theta_c):
+    C1 = interp1d(_M, interp1d(_N, interp1d(_Gc, _C1)(Gc))(N))(M)
+    C2 = interp1d(_M, interp1d(_N, interp1d(_Gc, _C2)(Gc))(N))(M)
+    C3 = interp1d(_M, interp1d(_N, interp1d(_Gc, _C3)(Gc))(N))(M)
+    Kb = interp1d(_M, interp1d(_N, interp1d(_Gc, _Kb)(Gc))(N))(M)
+
+    return C1, C2, C3, Kb
+
+def get_L10_sand(K, M):
 
     """
         To calculate the parameter required for limiting the 
@@ -231,21 +199,16 @@ def get_L10_sand(Hs, Tp, d, spectrum, theta_w, s, OD,
         taken from Table 3-4. 
     """
 
-    K = get_K(Hs, Tp, d, spectrum, theta_w, s, OD)
-    M = get_M(Vc, z0, zr, OD, theta_c, Hs, Tp, d, spectrum)
-
     # Extract the required value from the array taken from
     # Table 3-4 in DNVGL-RP-F109
     k_value = L_10_sand[0, :]
     m_value = L_10_sand[:, 0]
-    x_val = lcp._get_closest(k_value, K)
-    y_val = lcp._get_closest(m_value, M)
+    x_val = _get_closest(k_value, K)
+    y_val = _get_closest(m_value, M)
 
-    return L_10_sand[y_val, x_val] / (2 + M)**2
+    return L_10_sand[y_val, x_val] * (2 + M)**2
 
-def get_L_stable_clay(Hs, Tp, d, theta_w, s, 
-                      Vc, z0, zr, theta_c, 
-                      su, gammas, OD, Fc, spectrum):
+def get_L_stable_clay(Gc, N, K, f_M):
     """
         The minimum pipe weight parameter required to keep the 
         pipe stable on a clayey is calculated using 
@@ -263,17 +226,12 @@ def get_L_stable_clay(Hs, Tp, d, theta_w, s,
         L_stable_clay = minimum pipe weight required to keep pipe stable
     """
 
-    N = get_N(Hs, Tp, d, spectrum, theta_w, s)
-    K = get_K(Hs, Tp, d, spectrum, theta_w, s, OD)
-    f_M = get_f_M(Vc, z0, zr, OD, theta_c, Hs, Tp, d, spectrum)
-
-    L_stable_clay = 90 * sqrt((dnv.get_Gc(su, OD, Fc)) / N**0.67 * K) * f_M 
+    L_stable_clay = 90 * sqrt(Gc / N**0.67 * K) * f_M 
 
     return L_stable_clay
 
 
-def get_L_stable_sand(Hs, Tp, d, theta_w, s,
-                      Vc, z0, zr, OD, theta_c, spectrum):
+def get_L_stable_sand(N, K, M):
     """
         The minimum pipe weight parameter needed to keep a pipe
         stable on the seabed is calculated using Tables 3-2 and 3-3
@@ -281,35 +239,33 @@ def get_L_stable_sand(Hs, Tp, d, theta_w, s,
 
     """
 
-    N = get_N(Hs, Tp, d, spectrum, theta_w, s)
-    K = get_K(Hs, Tp, d, spectrum, theta_w, s, OD)
-    M = get_M(Vc, z0, zr, OD, theta_c, Hs, Tp, d, spectrum)
-
     k_val_10 = K_10_array[0,:]
     m_val_10 = K_10_array[:,0]
-    x_val_10 = lcp._get_closest(k_val_10, K)
-    y_val_10 = lcp._get_closest(m_val_10, M)
+    x_val_10 = _get_closest(k_val_10, K)
+    y_val_10 = _get_closest(m_val_10, M)
     n_val_5 = K_5_array[0,:]
     m_val_5 = K_5_array[:,0]
-    x_val_5 = lcp._get_closest(n_val_5, N)
-    y_val_5 = lcp._get_closest(m_val_5, M) 
+    x_val_5 = _get_closest(n_val_5, N)
+    y_val_5 = _get_closest(m_val_5, M) 
 
     if K > 10:
         L_stable_sand = K_10_array[y_val_10, x_val_10]
 
     elif 5 <= K < 10:
-        # Attempted linear interpolation, will need to see if it works
         L_10 = K_10_array[y_val_10, x_val_10]
         L_5 = K_5_array[y_val_5, x_val_5]
-        L_stable_sand = interp2d(L_5, L_10, 5, kind='linear')
-    else:
+        L_stable_sand = ((L_10 - L_5) / 5) * K + L_5
+    elif K < 5:
         L_stable_sand = K_5_array[y_val_5, x_val_5]
 
-    return L_stable_sand
+    return L_stable_sand * (2 + M)**2
 
-def get_f_M(Vc, z0, zr, OD, theta_c, Hs, Tp, d, spectrum):
+def get_f_M(M):
 
-    M = get_M(Vc, z0, zr, OD, theta_c, Hs, Tp, d, spectrum) 
+    """
+        Function of M used in the calculation of the specific
+        weight parameter, sg. 
+    """
 
     f_M = ((0.58 * np.log(M))**2 + 0.6 * np.log(M) + 0.47)
 
@@ -320,37 +276,52 @@ def get_f_M(Vc, z0, zr, OD, theta_c, Hs, Tp, d, spectrum):
 
     return f_M_end
 
-def get_M(Vc, z0, zr, OD, theta_c, Hs, Tp, d, spectrum):
+def get_M(Vc, z0, zr, OD, theta_c, U_s):
 
-    U_s = 2 * sqrt(w.get_M(0, Hs, Tp, d, spectrum))
+    """
+        Steady to oscillatory velocity ratio for design 
+        spectrum. 
+    """
 
     return c.Vc(Vc, z0, zr, OD, theta_c) / U_s
 
-def get_K(Hs, Tp, d, spectrum, theta_w, s, OD):
 
-    U_s = 2 * sqrt(w.get_M(0, Hs, Tp, d, spectrum))
-    T_u = w.get_flow(Hs, Tp, d, theta_w, s, spectrum)[1]
+def get_K(U_s, T_u, OD):
+
+    """
+        Significant Keulegan-Carpenter number
+    """
 
     return U_s * T_u / OD
 
-def get_L(OD, wt, rho_p, rho_w, Hs, Tp, d, spectrum):
+def get_L(U_s, w_s, OD, rho_sw):
 
-    w_s = br._get_submerged_weight(OD, wt, rho_p, rho_w) # may need to have concrete wall thickness in there as well, need seperate equation?
-    U_s = 2 * sqrt(w.get_M(0, Hs, Tp, d, spectrum))
+    """
+        Significant weight parameter 
+    """
 
-    return w_s / (0.5 * rho_w * OD * U_s**2)
+    return w_s / (0.5 * rho_sw * OD * U_s**2)
 
-def get_N(Hs, Tp, d, spectrum, theta_w, s):
+def get_N(U_s, T_u):
 
-    U_s = 2 * sqrt(w.get_M(0, Hs, Tp, d, spectrum))
-    T_u = w.get_flow(Hs, Tp, d, theta_w, s, spectrum)[1]
+    """
+        Spectral acceleration factor
+    """
 
     return U_s / (g * T_u)
 
+def get_U_s(Hs, Tp, d, spectrum):
 
-def absolute_stability(rho_w, rho_p, OD, mu, gammas, su, soil_type, location, 
+    return 2 * sqrt(w.get_M(0, Hs, Tp, d, spectrum))
+
+def get_T_u(Hs, Tp, d, spectrum, theta_w, s):
+
+    return w.get_flow(Hs, Tp, d, theta_w, s, spectrum)[1]
+
+def absolute_stability(rho_w, rho_s, rho_cont, OD, mu, gammas, su, soil_type, location, 
                         grade, wt, Hs, Tp, depth, s, T_ss, kv, Fc, theta_t, 
-                        z_t, Vc, z0, zr, theta_c, theta_w, Fz, spectrum):
+                        z_t, Vc, z0, zr, theta_c, theta_w, Fz, rho_conc, rho_m,
+                        rho_coat, t_corr, t_conc, t_m, t_coat, spectrum):
     """
         Function to define whether the forces applied to the pipe
         exceed the absolute stability criteria. 
@@ -373,7 +344,8 @@ def absolute_stability(rho_w, rho_p, OD, mu, gammas, su, soil_type, location,
     else:
         raise TypeError('Soil type is invalid')
 
-    w_s = br._get_submerged_weight(OD, wt, rho_p, rho_w)
+    w_s = get_wsub(OD, wt, t_corr, t_conc, t_m, t_coat, rho_s, rho_cont,
+             rho_conc, rho_m, rho_coat, rho_w)
     # Equation 3.38
     stab = gamma_ysc * (F_y + mu * F_z) / (mu * w_s * F_r)
 
@@ -496,8 +468,8 @@ def get_Cy(Hs, Tp, d, OD, T_ss, Vc, z0, zr, theta_c, kv, theta_w, s, spectrum):
 
     # For now I have just used the get closest value instead of interpolating.
     # Further development may be looking at making it so that this is interpolated.
-    x_val = lcp._get_closest(K_star_values, K_star)
-    y_val = lcp._get_closest(M_star_values, M_star)
+    x_val = _get_closest(K_star_values, K_star)
+    y_val = _get_closest(M_star_values, M_star)
 
     if K_star < 2.5:
         Cy = Cy_array[1, y_val] * 2.5 / K_star
@@ -530,8 +502,8 @@ def get_Cz(Hs, Tp, d, OD, T_ss, Vc, z0, zr, theta_c, kv, theta_w, s, spectrum):
 
     # For now I have just used the get closest value instead of interpolating.
     # Further development may be looking at making it so that this is interpolated.
-    x_val = lcp._get_closest(K_star_values, K_star)
-    y_val = lcp._get_closest(M_star_values, M_star)
+    x_val = _get_closest(K_star_values, K_star)
+    y_val = _get_closest(M_star_values, M_star)
 
     if K_star <= 2.5:
         Cz = Cz_array[1, y_val]
@@ -619,6 +591,141 @@ def get_k_T(Hs, Tp, depth, theta_w, s, spectrum):
         k_T = 1
 
     return k_T
+
+def get_wsub(OD, t, t_corr, t_conc, t_m, t_coat, rho_s, rho_cont,
+             rho_conc, rho_m, rho_coat, rho_sw):
+    """
+        Function to get the submerged weight of the pipe
+
+        Inputs
+        ------
+        OD = pipe outside diameter
+        t = wall thickness
+        t_corr = corrosion coating thickness
+        t_conc = concrete thickness
+        t_m = marine growth thickness
+        t_coat = coating thickness
+        rho_s = steel density
+        rho_cont = contents density
+        rho_conc = concrete density
+        rho_m = marine growth density
+        rho_coat = coating density
+        rho_sw = seawater density
+
+        Outputs
+        ------
+        w_sub = submerged weight of pipe
+        buoy = buoyancy of the pipe
+        D_o = overall outside diameter of pipe
+
+    """
+
+    D_o = get_D_o(OD, t_corr, t_conc, t_m)
+    buoy = buoyancy(OD, t_corr, t_conc, t_m, rho_sw)
+    ID = OD - 2 * t
+
+    w_steel = layer_weight(OD, rho_s, ID)
+    w_cont = layer_weight(ID, rho_cont)
+    w_conc = layer_weight((D_o - 2 * t_m), rho_conc, (OD + 2 * t_corr))
+    w_m = layer_weight(D_o, rho_m, (D_o - 2 * t_m))
+    w_coat = layer_weight(ID, rho_coat, (ID - 2 * t_coat))
+
+    return (w_steel + w_cont + w_conc + w_m + w_coat) - buoy
+
+def layer_weight(OD, rho, ID=0):
+    """
+        Generic function to calculate layer weight
+        dependent on the diameters and density of material.
+
+        Inputs
+        ------
+        OD = outside diameter
+        ID = inside diameter
+        rho = density of material
+
+        Outputs
+        ------
+        w = layer weight
+    """
+    return get_area(OD, ID) * rho
+
+def get_area(OD, ID=0):
+    """
+        Generic function to calculate area of pipe based on outer and 
+        internal diameter.
+
+        Inputs
+        ------
+        OD = outer diameter
+        ID = inner diameter
+
+        Outputs
+        ------
+        A = area of pipe
+    """
+    return np.pi * (OD**2 - ID**2) / 4
+
+def get_D_o(OD, t_corr, t_conc, t_m):
+    """
+        Function to calculate the full outside diameter of 
+        the pipe with all coatings etc considered.
+
+        Inputs
+        ------
+        OD = outside diameter of pipe
+        t_corr = corrosion protection thickness
+        t_conc = concrete thickness
+        t_m = marine growth thickness
+
+        Outputs
+        ------
+        D_o = overall outside diameter
+    """
+    return OD + 2 * t_corr + 2 * t_conc + 2 * t_m
+
+def buoyancy(OD, t_corr, t_conc, t_m, rho_sw):
+    """
+        Calculate submerged buoyancy weight of pipe. 
+
+        Inputs
+        -------
+        OD = pipe outside diameter
+        t_corr = corrosion protection thickness
+        t_conc = concrete thickness
+        t_m = marine growth thickness
+        rho_sw = seawater density
+
+        Outputs
+        ------
+        buoy = calculated submerged buoyancy of pipe
+    """
+    D_o = get_D_o(OD, t_corr, t_conc, t_m)
+
+    return np.pi / 4 * D_o**2 * rho_sw
+
+def _get_closest(array, values):
+    """ Helper function to find the closest cell to a point.
+    Mainly to be used to 
+
+    Inputs
+    ------
+    array: array of values to be searched
+    values: list of values to search for index
+
+    Returns
+    -------
+    NumPy array of indices corresponding to each item in values
+    """
+    if isinstance(values, (int, float)):
+        values = np.array([values])
+    if not isinstance(values, np.ndarray):
+        raise TypeError('values should be a numeric type or a numpy array')
+    closest = np.empty(values.shape, dtype=int)
+    for i in range(values.size):
+        closest[i] = (np.abs(array - values[i])).argmin()
+    if closest.shape == (1,):
+        closest = closest[0]
+    return closest
 
 data = {"North Sea winter": {"Sand and rock": {"Low": 0.98,
                                         "Normal": 1.32,
@@ -709,120 +816,283 @@ L_10_sand = np.array([[0,   5,    10,   15,   20,   30,   40,   60,   100],
                       [10,  2.50, 2.50, 2.50, 2.50, 2.50, 2.50, 2.50, 2.50]])
 
 
-values = {'01': np.array([[0.2, 0,   9, 0.6, 10],
-                            [0.4, 0,   8, 0.6, 10],
-                            [0.5, 0.1, 7, 0.6, 10],
-                            [0.6, 0.1, 7, 0.6, 10],
-                            [0.8, 0.1, 7, 0.6, 10],
-                            [1.0, 0.4, 5, 0.6, 5],
-                            [1.5, 0.4, 5, 0.6, 5],
-                            [2.0, 0.7, 3, 0.6, 5],
-                            [4.0, 1.4, 1, 0.6, 5]]),
-            '02': np.array([[0.2, 0.2, 5, 0.5, 15], 
-                            [0.4, 0.2, 5, 0.5, 15],
-                            [0.5, 0.4, 4, 0.5, 15],
-                            [0.6, 0.4, 4, 0.5, 15],
-                            [0.8, 0.7, 3, 0.5, 15],
-                            [1.0, 0.6, 3, 0.5, 15],
-                            [1.5, 1.1, 2, 0.5, 15],
-                            [2.0, 1.6, 0, 0.5, 15],
-                            [4.0, 1.9, 0, 0.5, 15]]),
-            '11': np.array([[0.2, 0.1, 9, 0.6, 10],
-                           [0.4, 0.1, 8, 0.6, 10],
-                           [0.5, 0.1, 8, 0.6, 10],
-                           [0.6, 0.2, 8, 0.6, 10],
-                           [0.8, 0.4, 7, 0.6, 5],
-                           [1.0, 0.4, 7, 0.6, 5],
-                           [1.5, 0.4, 5, 0.6, 5],
-                           [2.0, 0.7, 3, 0.6, 5],
-                           [4.0, 1.4, 1, 0.6, 5]]),
-            '12': np.array([[0.2, 0.1, 7, 0.6, 10],
-                           [0.4, 0.1, 7, 0.6, 10],
-                           [0.5, 0.1, 7, 0.6, 10],
-                           [0.6, 0.2, 6, 0.6, 10],
-                           [0.8, 0.3, 6, 0.6, 10],
-                           [1.0, 0.4, 6, 0.6, 10],
-                           [1.5, 0.8, 4, 0.6, 10],
-                           [2.0, 1.5, 0, 0.6, 10],
-                           [4.0, 1.5, 0, 0.6, 10]]),
-            '21': np.array([[0.2, 0.1, 8, 0.5, 15],
-                           [0.4, 0.1, 7, 0.5, 10],
-                           [0.5, 0.1, 7, 0.5, 10],
-                           [0.6, 0.1, 7, 0.5, 10],
-                           [0.8, 0.1, 7, 0.5, 5],
-                           [1.0, 0.1, 7, 0.5, 5],
-                           [1.5, 0.1, 7, 0.5, 5],
-                           [2.0, 0.1, 7, 0.5, 5],
-                           [4.0, 0.1, 7, 0.5, 5],
-                           [10, 0.1, 7, 0.5, 5]]),
-            '22': np.array([[0.2, 0.1, 8, 0.5, 10],
-                           [0.4, -0.3, 8, 0.5, 10],
-                           [0.5, -0.1, 7, 0.5, 10],
-                           [0.6, 0.0, 7, 0.5, 10],
-                           [0.8, 0.1, 6, 0.5, 5],
-                           [1.0, 0.1, 6, 0.5, 5],
-                           [1.5, 0.5, 3, 0.5, 5],
-                           [2.0, 0.9, 2, 0.5, 5],
-                           [4.0, 1.7, 0, 0.5, 5],
-                           [10, 1.7, 0, 0.5, 5]]),
-            '31': np.array([[0.2, 1.4, 3, 0.5, 15],
-                           [0.4, 0.5, 6, 0.5, 5],
-                           [0.5, 0.5, 6, 0.5, 5],
-                           [0.6, 0.5, 6, 0.5, 5],
-                           [0.8, 1.1, 4, 0.5, 5],
-                           [1.0, 1.3, 4, 0.5, 10],
-                           [1.5, 1.2, 7, 0.5, 10],
-                           [2.0, 1.2, 7, 0.5, 10],
-                           [4.0, 1.2, 7, 0.5, 10],
-                           [10, 1.4, 6, 0.5, 10]]),
-            '32': np.array([[0.2, 0.0, 8, 0.5, 10],
-                           [0.4, 0.3, 6, 0.5, 5],
-                           [0.5, 0.3, 6, 0.5, 5],
-                           [0.6, 0.3, 6, 0.5, 5],
-                           [0.8, 0.4, 7, 0.5, 5],
-                           [1.0, 0.4, 7, 0.5, 5],
-                           [1.5, 0.8, 6, 0.5, 10],
-                           [2.0, 0.8, 6, 0.5, 10],
-                           [4.0, 0.8, 6, 0.5, 10],
-                           [10, 0.8, 6, 0.5, 10]]),
-            '41': np.array([[0.2, 2.1, 1, 0.5, 15],
-                          [0.4, 2.4, 2, 0.5, 15],
-                          [0.5, 2.4, 2, 0.5, 15],
-                          [0.6, 1.9, 6, 0.5, 15],
-                          [0.8, 2.2, 8, 0.5, 15],
-                          [1.0, 2.2, 8, 0.5, 15],
-                          [1.5, 2.4, 8, 0.5, 15]]),
-            '42': np.array([[0.2, 1.4, 4, 0.5, 15],
-                          [0.4, 1.1, 7, 0.5, 15],
-                          [0.5, 1.5, 5, 0.5, 15],
-                          [0.6, 1.6, 5, 0.5, 15],
-                          [0.8, 1.9, 6, 0.5, 15],
-                          [1.0, 2.2, 6, 0.5, 15],
-                          [1.5, 2.0, 8, 0.5, 15]]),
-            '51': np.array([[0.2, 3.4, 1, 0.5, 20],
-                          [0.4, 3.4, 1, 0.5, 20],
-                          [0.5, 3.0, 4, 0.5, 20],
-                          [0.6, 3.2, 6, 0.5, 15],
-                          [0.8, 2.4, 12, 0.5, 15],
-                          [1.0, 2.3, 12, 0.5, 15],
-                          [1.5, 2.3, 12, 0.5, 15],
-                          [2.0, 2.3, 12, 0.5, 15],
-                          [4.0, 2.3, 12, 0.5, 15]]),
-            '52': np.array([[0.2, 2.7, 3, 0.5, 20],
-                          [0.4, 2.4, 4, 0.5, 20],
-                          [0.5, 2.2, 7, 0.5, 20],
-                          [0.6, 1.9, 9, 0.5, 15],
-                          [0.8, 1.9, 12, 0.5, 15],
-                          [1.0, 1.5, 14, 0.5, 15],
-                          [1.5, 1.5, 14, 0.5, 15],
-                          [2.0, 1.5, 14, 0.5, 15],
-                          [4.0, 1.5, 14, 0.5, 15]])}
+_C1 = np.array([[# Gc = 0.0556
+                 [0, 0.2, 0.2],
+                 [0, 0.2, 0.2],
+                 [0.1, 0.4, 0.4],
+                 [0.1, 0.4, 0.4],
+                 [0.1, 0.7, 0.7],
+                 [0.4, 0.7, 0.7],
+                 [0.4, 1.1, 1.1],
+                 [0.7, 1.6, 1.6],
+                 [1.4, 1.9, 1.9],
+                 [1.4, 1.9, 1.9]],
+                 [# Gc = 0.111
+                 [0.1, 0.1, 0.1],
+                 [0.1, 0.1, 0.1],
+                 [0.1, 0.1, 0.1],
+                 [0.2, 0.2, 0.2],
+                 [0.4, 0.3, 0.3],
+                 [0.4, 0.4, 0.4],
+                 [0.4, 0.8, 0.8],
+                 [0.7, 1.5, 1.5],
+                 [1.4, 1.5, 1.5],
+                 [1.4, 1.5, 1.5]],
+                 [# Gc = 0.222
+                 [0.1, 0.1, 0.1],
+                 [0.1, -0.3, -0.3],
+                 [0.1, -0.1, -0.1],
+                 [0.1, 0, 0],
+                 [0.1, 0.1, 0.1],
+                 [0.1, 0.1, 0.1],
+                 [0.1, 0.5, 0.5],
+                 [0.1, 0.9, 0.9],
+                 [0.1, 1.7, 1.7],
+                 [0.1, 1.7, 1.7]],
+                 [# Gc = 0.556
+                 [1.4, 0, 0],
+                 [0.5, 0.3, 0.3], 
+                 [0.5, 0.3, 0.3],
+                 [0.5, 0.3, 0.3],
+                 [1.1, 0.4, 0.4],
+                 [1.3, 0.4, 0.4],
+                 [1.2, 0.8, 0.8],
+                 [1.2, 0.8, 0.8],
+                 [1.2, 0.8, 0.8],
+                 [1.4, 0.8, 0.8]],
+                 [#Gc = 1.11
+                 [2.1, 1.4, 1.4],
+                 [2.4, 1.1, 1.1],
+                 [2.4, 1.5, 1.5],
+                 [1.9, 1.6, 1.6],
+                 [2.2, 1.9, 1.9],
+                 [2.2, 2.2, 2.2],
+                 [2.4, 2, 2],
+                 [2.4, 2, 2],
+                 [2.4, 2, 2],
+                 [2.4, 2, 2]],
+                 [#Gc = 2.78
+                 [3.4, 2.7, 2.7],
+                 [3.4, 2.4, 2.4],
+                 [3.0, 2.2, 2.2],
+                 [3.2, 1.9, 1.9],
+                 [2.4, 1.9, 1.9],
+                 [2.3, 1.5, 1.5],
+                 [2.3, 1.5, 1.5],
+                 [2.3, 1.5, 1.5],
+                 [2.3, 1.5, 1.5],
+                 [2.3, 1.5, 1.5]]])
 
-Gc_values = [0.0556, 0.111, 0.222, 0.556, 1.11, 2.78]
+_C2 = np.array([[#Gc = 0.0556
+                 [9, 5, 5],
+                 [8, 5, 5],
+                 [7, 4, 4],
+                 [7, 4, 4],
+                 [7, 3, 3],
+                 [5, 3, 3],
+                 [5, 2, 2],
+                 [3, 0, 0],
+                 [1, 0, 0],
+                 [1, 0, 0]],
+                 [#Gc = 0.111
+                 [9, 7, 7],
+                 [8, 7, 7],
+                 [8, 7, 7],
+                 [8, 6, 6],
+                 [7, 6, 6],
+                 [7, 6, 6],
+                 [5, 4, 4],
+                 [3, 0, 0],
+                 [1, 0, 0],
+                 [1, 0, 0]],
+                 [#Gc = 0.222
+                 [8, 8, 8],
+                 [7, 8, 8],
+                 [7, 7, 7],
+                 [7, 7, 7],
+                 [7, 6, 6],
+                 [7, 6, 6],
+                 [7, 3, 3],
+                 [7, 2, 2],
+                 [7, 0, 0],
+                 [7, 0, 0]],
+                 [#Gc = 0.556
+                 [3, 8, 8],
+                 [6, 6, 6],
+                 [6, 6, 6],
+                 [6, 6, 6],
+                 [4, 7, 7],
+                 [4, 7, 7],
+                 [7, 6, 6],
+                 [7, 6, 6],
+                 [7, 6, 6],
+                 [6, 6, 6]],
+                 [#Gc = 1.11
+                 [1, 4, 4],
+                 [2, 7, 7],
+                 [2, 5, 5],
+                 [6, 5, 5],
+                 [8, 6, 6],
+                 [8, 6, 6],
+                 [8, 8, 8],
+                 [8, 8, 8],
+                 [8, 8, 8],
+                 [8, 8, 8]],
+                 [#Gc = 2.78
+                 [1, 3, 3],
+                 [1, 4, 4],
+                 [4, 7, 7],
+                 [6, 9, 9],
+                 [12, 12, 12],
+                 [12, 14, 14],
+                 [12, 14, 14],
+                 [12, 14, 14],
+                 [12, 14, 14],
+                 [12, 14, 14],
+                 [12, 14, 14]]])
 
+_C3 = np.array([[#Gc = 0.0556
+                 [0.6, 0.5, 0.5],
+                 [0.6, 0.5, 0.5],
+                 [0.6, 0.5, 0.5],
+                 [0.6, 0.5, 0.5],
+                 [0.6, 0.5, 0.5],
+                 [0.6, 0.5, 0.5],
+                 [0.6, 0.5, 0.5],
+                 [0.6, 0.5, 0.5],
+                 [0.6, 0.5, 0.5],
+                 [0.6, 0.5, 0.5]],
+                 [#Gc = 0.111
+                 [0.6, 0.6, 0.6],
+                 [0.6, 0.6, 0.6],
+                 [0.6, 0.6, 0.6],
+                 [0.6, 0.6, 0.6],
+                 [0.6, 0.6, 0.6],
+                 [0.6, 0.6, 0.6],
+                 [0.6, 0.6, 0.6],
+                 [0.6, 0.6, 0.6],
+                 [0.6, 0.6, 0.6],
+                 [0.6, 0.6, 0.6]],
+                 [#Gc = 0.222
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5]],
+                 [#Gc = 0.556
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5]],
+                 [#Gc = 1.11
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5]],
+                 [#Gc = 2.78
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5],
+                 [0.5, 0.5, 0.5]]])
+
+_Kb = np.array([[#Gc = 0.0556
+                [10, 15, 15],
+                [10, 15, 15],
+                [10, 15, 15],
+                [10, 15, 15],
+                [10, 15, 15],
+                [5, 15, 15],
+                [5, 15, 15],
+                [5, 15, 15],
+                [5, 15, 15],
+                [5, 15, 15]],
+                [#Gc = 0.111
+                [10, 10, 10],
+                [10, 10, 10],
+                [10, 10, 10],
+                [10, 10, 10],
+                [5, 10, 10],
+                [5, 10, 10],
+                [5, 10, 10],
+                [5, 10, 10],
+                [5, 10, 10],
+                [5, 10, 10]],
+                [#Gc = 0.222
+                [15, 10, 10],
+                [10, 10, 10],
+                [10, 10, 10],
+                [10, 10, 10],
+                [5, 5, 5],
+                [5, 5, 5],
+                [5, 5, 5],
+                [5, 5, 5],
+                [5, 5, 5],
+                [5, 5, 5]],
+                [#Gc = 0.556
+                [15, 10, 10],
+                [5, 5, 5],
+                [5, 5, 5],
+                [5, 5, 5],
+                [5, 5, 5],
+                [10, 5, 5],
+                [10, 10, 10],
+                [10, 10, 10],
+                [10, 10, 10],
+                [10, 10, 10]],
+                [#Gc = 1.11
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15]],
+                [#Gc = 2.78
+                [20, 20, 20],
+                [20, 20, 20],
+                [20, 20, 20],
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15],
+                [15, 15, 15]]])
+
+_Gc = np.array([0.0556, 0.111, 0.222, 0.556, 1.11, 2.78])
+_M = np.array([0.2, 0.4, 0.5, 0.6, 0.8, 1.0, 1.5, 2, 4, 10])
+_N = np.array([0.003, 0.006, 0.024])
 
 if __name__ == '__main__':
-    print(overall_stability(1025, 7850, 0.4572, 0.6, 19000, 15000, 'Clay', 'North Sea cyclonic',
-                            'Low', 0.05, 10.1, 15.8, 50, 5, 10000, 2, 1215, 30, 1,
-                            0.45, 0.00004, 3, 35, 90, 0, spectrum='jonswap'))
+    print(get_wall_thick(Hs, Tp, d, theta_w, mu, s, Vc, rho_s, rho_cont, rho_conc, 
+                    z0, zr, theta_c, su, gammas, OD, rho_m, rho_coat, t_corr,
+                    t_conc, t_m, t_coat, soil_type, rho_sw, Fc, wt, 
+                    grade, T_ss, kv, theta_t, z_t, Fz, spectrum=jonswap))
 
