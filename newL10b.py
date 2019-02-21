@@ -1,12 +1,4 @@
-import numpy as np
-from scipy.interpolate import interpn
-import time
-
-_Gc = np.array([0.0556, 0.111, 0.222, 0.556, 1.11, 2.78])
-_N = np.array([0.003, 0.006, 0.024])
-_M = np.array([0.2, 0.4, 0.5, 0.6, 0.8, 1.0, 1.5, 2, 4, 10])
-
-L10 = np.array([
+L10a = np.array([
                  [# Gc = 0.0556
                   [# N = 0.003
                    [0,9,0.6,10],
@@ -211,6 +203,3 @@ L10 = np.array([
                    [1.5,14,0.5,15],
                    [1.5,14,0.5,15],
                    [1.5,14,0.5,15]]]])
-
-def get_L10(Gc, N, M):
-    return interpn((_Gc, _N, _M), L10, (Gc, N, M))
